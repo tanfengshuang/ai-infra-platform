@@ -1,0 +1,33 @@
+repositories:
+  - name: eks
+    url: https://aws.github.io/eks-charts
+  - name: bitnami
+    url: https://charts.bitnami.com/bitnami
+
+releases:
+  - name: aws-load-balancer-controller
+    namespace: kube-system
+    chart: eks/aws-load-balancer-controller
+    version: 1.7.2
+    values:
+      - clusterName: core-platform-cluster
+      - serviceAccount:
+          create: true
+          name: aws-load-balancer-controller
+          annotations:
+            eks.amazonaws.com/role-arn: arn:aws:iam::879866609414:role/eks-alb-controller
+
+  - name: external-dns
+    namespace: kube-system
+    chart: bitnami/external-dns
+    version: 9.0.3
+    values:
+      - provider: aws
+      - aws:
+          zoneType: private
+      - txtOwnerId: aiops-local
+      - serviceAccount:
+          create: true
+          name: external-dns
+          annotations:
+            eks.amazonaws.com/role-arn: arn:aws:iam::879866609414:role/eks-external-dns

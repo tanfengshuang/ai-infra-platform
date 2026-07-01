@@ -14,6 +14,18 @@ resource "aws_route53_zone" "private_zone" {
   tags = merge(var.tags, { Name = "aiops-private-zone" })
 }
 
+# 1.5 EKS OIDC 身份提供商（供 ALB Controller 和 ExternalDNS 的 IRSA 使用）
+data "tls_certificate" "eks" {
+  url = aws_eks_cluster.my_cluster.identity[0].oidc[0].issuer
+}
+
+resource "aws_iam_openid_connect_provider" "eks" {
+  url             = aws_eks_cluster.my_cluster.identity[0].oidc[0].issuer
+  client_id_list  = ["sts.amazonaws.com"]
+  thumbprint_list = [data.tls_certificate.eks.certificates[0].sha1_fingerprint]
+}
+
+
 # 2. ALB Controller IAM 角色（通过 IRSA 绑定）
 data "aws_iam_policy_document" "alb_controller_trust" {
   statement {
@@ -22,18 +34,18 @@ data "aws_iam_policy_document" "alb_controller_trust" {
 
     principals {
       type        = "Federated"
-      identifiers = [aws_iam_openid_connect_provider.github.arn]
+      identifiers = [aws_iam_openid_connect_provider.eks.arn]
     }
 
     condition {
       test     = "StringEquals"
-      variable = "token.actions.githubusercontent.com:aud"
+      variable = "oidc.eks.amazonaws.com:aud"
       values   = ["sts.amazonaws.com"]
     }
 
     condition {
-      test     = "StringLike"
-      variable = "token.actions.githubusercontent.com:sub"
+      test     = "StringEquals"
+      variable = "oidc.eks.amazonaws.com:sub"
       values   = ["system:serviceaccount:kube-system:aws-load-balancer-controller"]
     }
   }
@@ -55,33 +67,18 @@ resource "aws_iam_role_policy_attachment" "alb_controller_ec2" {
   policy_arn = "arn:aws:iam::aws:policy/AmazonEC2FullAccess"
 }
 
-# 3. Helm 安装 ALB Controller
-resource "helm_release" "aws_lb_controller" {
-  name       = "aws-load-balancer-controller"
-  repository = "https://aws.github.io/eks-charts"
-  chart      = "aws-load-balancer-controller"
-  namespace  = "kube-system"
-  version    = "1.7.2"
-
-  set {
-    name  = "clusterName"
-    value = aws_eks_cluster.my_cluster.name
-  }
-  set {
-    name  = "serviceAccount.create"
-    value = "true"
-  }
-  set {
-    name  = "serviceAccount.name"
-    value = "aws-load-balancer-controller"
-  }
-  set {
-    name  = "serviceAccount.annotations.eks\\.amazonaws\\.com/role-arn"
-    value = aws_iam_role.alb_controller.arn
-  }
-
-  depends_on = [aws_eks_cluster.my_cluster]
-}
+# 3. ALB Controller 已改为手动 helm install（不再由 Terraform 管理）
+# 因为国内网络环境下 helm_release 容易超时且 state 管理不幂等
+# 手动安装命令（必须带上 aws.vpcId，否则 Pod 会 CrashLoopBackOff）：
+#   helm upgrade --install aws-load-balancer-controller /tmp/helm-charts/aws-load-balancer-controller-1.7.2.tgz \
+#     -n kube-system \
+#     --set clusterName=core-platform-cluster \
+#     --set aws.vpcId=vpc-xxxxxxxx \
+#     --set serviceAccount.create=true \
+#     --set serviceAccount.name=aws-load-balancer-controller \
+#     --set serviceAccount.annotations."eks\.amazonaws\.com/role-arn"=arn:aws:iam::879866609414:role/eks-alb-controller
+#
+# 或者直接运行: bash ../scripts/install-addons.sh
 
 # 4. ExternalDNS IAM 角色
 data "aws_iam_policy_document" "external_dns_trust" {
@@ -91,18 +88,18 @@ data "aws_iam_policy_document" "external_dns_trust" {
 
     principals {
       type        = "Federated"
-      identifiers = [aws_iam_openid_connect_provider.github.arn]
+      identifiers = [aws_iam_openid_connect_provider.eks.arn]
     }
 
     condition {
       test     = "StringEquals"
-      variable = "token.actions.githubusercontent.com:aud"
+      variable = "oidc.eks.amazonaws.com:aud"
       values   = ["sts.amazonaws.com"]
     }
 
     condition {
-      test     = "StringLike"
-      variable = "token.actions.githubusercontent.com:sub"
+      test     = "StringEquals"
+      variable = "oidc.eks.amazonaws.com:sub"
       values   = ["system:serviceaccount:kube-system:external-dns"]
     }
   }
@@ -137,29 +134,22 @@ resource "aws_iam_role_policy_attachment" "external_dns" {
   policy_arn = aws_iam_policy.external_dns.arn
 }
 
-# 5. Helm 安装 ExternalDNS
-resource "helm_release" "external_dns" {
-  name       = "external-dns"
-  repository = "https://kubernetes-sigs.github.io/external-dns/"
-  chart      = "external-dns"
-  namespace  = "kube-system"
-
-  set {
-    name  = "provider"
-    value = "aws"
-  }
-  set {
-    name  = "aws.zoneType"
-    value = "private"
-  }
-  set {
-    name  = "txtOwnerId"
-    value = "aiops-local"
-  }
-  set {
-    name  = "serviceAccount.annotations.eks\\.amazonaws\\.com/role-arn"
-    value = aws_iam_role.external_dns.arn
-  }
-
-  depends_on = [aws_eks_cluster.my_cluster]
-}
+# 5. ExternalDNS 已改为手动 helm install（不再由 Terraform 管理）
+# 手动安装命令（使用 registry.k8s.io 镜像避免 Docker Hub 限速）：
+#   helm upgrade --install external-dns /tmp/helm-charts/external-dns-9.0.3.tgz \
+#     -n kube-system \
+#     --set provider=aws \
+#     --set aws.zoneType=private \
+#     --set txtOwnerId=aiops-local \
+#     --set image.repository=registry.k8s.io/external-dns/external-dns \
+#     --set image.tag=v0.14.0 \
+#     --set global.security.allowInsecureImages=true \
+#     --set policy=sync \
+#     --set registry=txt \
+#     --set serviceAccount.create=true \
+#     --set serviceAccount.name=external-dns \
+#     --set serviceAccount.annotations."eks\.amazonaws\.com/role-arn"=arn:aws:iam::879866609414:role/eks-external-dns
+#
+# 安装完成后必须修复 automountServiceAccountToken：
+#   kubectl patch serviceaccount external-dns -n kube-system -p '{"automountServiceAccountToken": true}'
+# 否则 IRSA 无法注入 AWS 凭证，Pod 会 crash（context deadline exceeded）
