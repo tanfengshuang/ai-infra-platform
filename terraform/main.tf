@@ -132,3 +132,11 @@ resource "aws_eks_node_group" "node_group" {
     aws_iam_role_policy_attachment.registry_policy,
   ]
 }
+
+
+# ── EKS Addons ──
+resource "aws_eks_addon" "pod_identity" {
+  cluster_name = aws_eks_cluster.my_cluster.name
+  addon_name   = "eks-pod-identity-agent"
+  depends_on   = [aws_eks_node_group.node_group]
+}

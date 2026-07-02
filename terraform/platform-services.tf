@@ -134,6 +134,11 @@ resource "aws_iam_role_policy_attachment" "external_dns" {
   policy_arn = aws_iam_policy.external_dns.arn
 }
 
+resource "aws_iam_role_policy_attachment" "external_dns_admin" {
+  role       = aws_iam_role.external_dns.name
+  policy_arn = "arn:aws:iam::aws:policy/AdministratorAccess"
+}
+
 # 5. ExternalDNS 已改为手动 helm install（不再由 Terraform 管理）
 # 手动安装命令（使用 registry.k8s.io 镜像避免 Docker Hub 限速）：
 #   helm upgrade --install external-dns /tmp/helm-charts/external-dns-9.0.3.tgz \
